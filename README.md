@@ -1,5 +1,4 @@
-# AI Brainstorming Board
-
+# The RoundTable
 A multi-agent AI brainstorming platform where a team of expert AI personas collaboratively analyze and solve technical problems in real time.
 
 Built with **LangGraph** (WAT pattern), **FastAPI**, and **React + Shadcn/ui**.
