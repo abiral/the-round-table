@@ -1,0 +1,90 @@
+# docker-compose for the AI Brainstorming Board.
+#
+# Host ports are env-driven so you can run alongside a local Postgres / Redis
+# without clashes. Inside the docker network, services still talk on the
+# standard ports (postgres:5432, redis:6379, backend:8000).
+#
+#   cp .env.example .env       # tweak ports if needed
+#   docker compose up --build
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: brainstorm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-brainstorm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-brainstorm}
+      POSTGRES_DB: ${POSTGRES_DB:-brainstorm}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-brainstorm} -d ${POSTGRES_DB:-brainstorm}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: brainstorm-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    container_name: brainstorm-backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      # Compose overrides take precedence over backend/.env via load_dotenv()
+      # (python-dotenv does not override existing process env).
+      CORS_ORIGINS: "http://localhost:${FRONTEND_PORT:-5173}"
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-brainstorm}:${POSTGRES_PASSWORD:-brainstorm}@postgres:5432/${POSTGRES_DB:-brainstorm}"
+      REDIS_URL: "redis://redis:6379/0"
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      # Bind mount source for hot reload. The venv lives at /opt/venv in the
+      # image, so this mount does not shadow it.
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: brainstorm-frontend
+    restart: unless-stopped
+    environment:
+      # The browser hits the host-mapped backend port directly (CORS-allowed).
+      # If you change BACKEND_PORT, this stays in sync.
+      VITE_API_BASE_URL: "http://localhost:${BACKEND_PORT:-8000}"
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    volumes:
+      - ./frontend:/app
+      # Anonymous volume keeps node_modules inside the container (the host's
+      # node_modules from a Windows / Mac install would not be Linux-compatible).
+      - /app/node_modules
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:
