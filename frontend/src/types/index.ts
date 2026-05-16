@@ -68,7 +68,7 @@ export interface UserMessage {
 
 export type ChatMessage = AgentMessage | UserMessage
 
-export type Phase = 'idle' | 'streaming' | 'awaiting_user' | 'concluded'
+export type Phase = 'idle' | 'streaming' | 'awaiting_user' | 'concluded' | 'errored'
 
 export type ExportKind = 'pdf' | 'adr' | 'plan'
 

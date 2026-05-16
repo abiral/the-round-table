@@ -2,7 +2,6 @@ import { Bot, LogOut, X } from 'lucide-react'
 import type { ConversationListItem } from '../../types'
 import type { AuthUser } from '../../hooks/useAuth'
 import { groupByBucket } from '../../lib/timeBuckets'
-import { cn } from '../../lib/utils'
 import { NewChatButton } from './NewChatButton'
 import { TimeBucketHeader } from './TimeBucketHeader'
 import { ConversationItem } from './ConversationItem'
@@ -34,25 +33,30 @@ export function Sidebar({
 }: SidebarProps) {
   const grouped = groupByBucket(conversations, c => new Date(c.last_message_at))
 
+  // Build aside classes via plain string interpolation so tailwind-merge cannot
+  // accidentally drop anything (we hit a visual bug where the white bg appeared
+  // stripped in production).
+  const asideClass = [
+    'w-64 h-full flex flex-col bg-white border-r border-subtle flex-shrink-0',
+    'fixed inset-y-0 left-0 z-50 transition-transform duration-200 ease-out',
+    'md:relative md:translate-x-0 md:transition-none',
+    mobileOpen ? 'translate-x-0' : '-translate-x-full',
+  ].join(' ')
+
   return (
     <>
       {/* Mobile backdrop */}
       {mobileOpen && (
         <div
-          className="fixed inset-0 z-30 bg-black/30 md:hidden"
+          className="fixed inset-0 z-40 bg-black/30 md:hidden"
           onClick={onMobileClose}
           aria-hidden="true"
         />
       )}
 
       <aside
-        className={cn(
-          'w-64 h-full flex flex-col bg-surface border-r border-subtle flex-shrink-0',
-          // Drawer below md, in-flow at md and up.
-          'fixed inset-y-0 left-0 z-40 transition-transform duration-200 ease-out',
-          'md:relative md:translate-x-0 md:transition-none',
-          mobileOpen ? 'translate-x-0' : '-translate-x-full',
-        )}
+        className={asideClass}
+        style={{ backgroundColor: '#FFFFFF' }}
         aria-hidden={!mobileOpen ? undefined : false}
       >
       {/* Brand */}

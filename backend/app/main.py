@@ -94,6 +94,10 @@ def _state_for_resume(prev: BrainstormState, user_content: str) -> BrainstormSta
         "content": user_content,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    # Append, do NOT replace. LangGraph's operator.add reducer only kicks in
+    # for in-graph node returns, not for the initial state we hand to astream,
+    # so we have to carry the full cumulative list ourselves.
+    prior_inputs = list(prev.get("user_inputs") or [])
     return {
         **prev,
         "awaiting_user_input": False,
@@ -103,7 +107,7 @@ def _state_for_resume(prev: BrainstormState, user_content: str) -> BrainstormSta
         "next_action": "",
         "next_mode": "full",
         "last_router_reason": "",
-        "user_inputs": [user_msg],
+        "user_inputs": [*prior_inputs, user_msg],
     }
 
 
@@ -121,7 +125,13 @@ async def _stream_graph(
     *,
     existing_title: str = "",
 ):
-    """Run the graph and yield SSE events. Persists the resulting state to Postgres."""
+    """Run the graph and yield SSE events.
+
+    Uses `astream(stream_mode="values")` so we hold the latest full-state
+    snapshot after every node. On any exit path (success, LLM error,
+    cancellation) we persist that snapshot to Postgres, so a mid-stream
+    failure leaves the conversation in a recoverable state for /retry.
+    """
     queue: asyncio.Queue = asyncio.Queue()
 
     async def stream_callback(event: dict):
@@ -132,18 +142,41 @@ async def _stream_graph(
 
     async def run_graph():
         try:
-            final = await brainstorm_graph.ainvoke(initial_state)
-            final_state_holder["state"] = final
+            async for snapshot in brainstorm_graph.astream(
+                initial_state, stream_mode="values"
+            ):
+                # Each yield is the full state after a node. Keep overwriting
+                # so the holder always carries the latest one we have seen.
+                final_state_holder["state"] = snapshot
         except Exception as exc:
             await queue.put({"type": "error", "message": str(exc)})
-        finally:
-            await queue.put(_DONE)
+
+        # Always try to persist whatever progress we have, even on error.
+        final = final_state_holder.get("state")
+        if final is not None:
+            try:
+                title = existing_title
+                if not title:
+                    title = await generate_title(final.get("user_goal", ""))
+                async with async_session_maker() as db:
+                    await store.save_state(
+                        db,
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        state=final,
+                        title=title or None,
+                    )
+            except Exception:
+                # Saving must not crash the SSE generator.
+                pass
+
+        await queue.put(_DONE)
 
     task = asyncio.create_task(run_graph())
 
-    # First event: announce the conversation id so the client can resume later.
-    # Field name stays `session_id` for backwards compatibility with existing
-    # frontend types; the value is the conversation UUID.
+    # First event: announce the conversation id. Field name stays `session_id`
+    # for backwards compatibility with existing frontend types; the value is
+    # the conversation UUID.
     yield f"data: {json.dumps({'type': 'session', 'session_id': str(conversation_id)})}\n\n"
 
     while True:
@@ -152,24 +185,13 @@ async def _stream_graph(
             break
         yield f"data: {json.dumps(event)}\n\n"
 
-    await task
+    try:
+        await task
+    except Exception:
+        pass
 
     final_state: BrainstormState | None = final_state_holder.get("state")
     if final_state is not None:
-        # Generate a title on the FIRST save of a new conversation.
-        title = existing_title
-        if not title:
-            title = await generate_title(final_state.get("user_goal", ""))
-
-        async with async_session_maker() as db:
-            await store.save_state(
-                db,
-                conversation_id=conversation_id,
-                user_id=user_id,
-                state=final_state,
-                title=title or None,
-            )
-
         if final_state.get("awaiting_user_input"):
             yield "data: " + json.dumps({
                 "type": "awaiting_user_input",
@@ -192,12 +214,60 @@ async def _stream_graph(
 async def brainstorm(
     request: BrainstormRequest,
     user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_session),
 ):
     conversation_id = uuid.uuid4()
     state = _initial_state(request.problem, request.constraints, str(conversation_id))
 
+    # Pre-create the conversation row so the user has a recoverable record even
+    # if the SSE stream is interrupted before the first save. The SSE generator
+    # will overwrite this with the post-graph state.
+    await store.save_state(
+        db,
+        conversation_id=conversation_id,
+        user_id=user.id,
+        state=state,
+        title="",
+    )
+
     return StreamingResponse(
         _stream_graph(state, conversation_id, user.id, existing_title=""),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.post("/api/brainstorm/{conversation_id}/retry")
+async def retry(
+    conversation_id: str,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Re-invoke the graph from the saved state without adding any user input.
+
+    Used when a previous round errored or the SSE stream was interrupted: the
+    user can resume from the last successful snapshot.
+    """
+    cid = _uuid_from(conversation_id)
+    row = await store.load(db, conversation_id=cid, user_id=user.id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    state = {
+        **(row.state or {}),
+        # Clear ephemeral routing fields so the router picks fresh.
+        "next_speaker": None,
+        "next_action": "",
+        "next_mode": "full",
+        "last_router_reason": "",
+    }
+
+    return StreamingResponse(
+        _stream_graph(state, cid, user.id, existing_title=row.title or ""),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

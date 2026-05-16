@@ -43,11 +43,18 @@ function BrainstormApp({ user, onLogout }: { user: AuthUser; onLogout: () => Pro
   }, [conversations])
 
   const brainstorm = useBrainstorm({ onSaved })
-  const { session, submitProblem, sendUserReply, downloadExport, cancel, reset, loadConversation } = brainstorm
+  const { session, loadKey, submitProblem, sendUserReply, downloadExport, cancel, reset, loadConversation, retry } = brainstorm
   const { phase, pausePrompt, exportsAvailable, sessionId } = session
 
+  // Resolve the active conversation's title from the sidebar list. Always
+  // visible above the chat, so the topic is never out of sight regardless of
+  // scroll position.
+  const activeTitle = sessionId
+    ? (conversations.items.find(c => c.id === sessionId)?.title ?? '')
+    : ''
+
   function handleSubmit(text: string) {
-    if (phase === 'awaiting_user') {
+    if (phase === 'awaiting_user' || phase === 'errored') {
       sendUserReply(text)
     } else if (phase === 'idle') {
       submitProblem(text)
@@ -56,6 +63,7 @@ function BrainstormApp({ user, onLogout }: { user: AuthUser; onLogout: () => Pro
 
   const isStreaming = phase === 'streaming'
   const isConcluded = phase === 'concluded'
+  const isErrored = phase === 'errored'
 
   return (
     <div className="flex h-full bg-app-gradient">
@@ -100,13 +108,33 @@ function BrainstormApp({ user, onLogout }: { user: AuthUser; onLogout: () => Pro
           </div>
         </div>
 
+        {/* Pinned topic header */}
+        {sessionId && activeTitle && (
+          <div className="px-4 md:px-6 pb-3 flex-shrink-0">
+            <div className="max-w-3xl mx-auto">
+              <h2
+                className="text-sm font-semibold text-text-strong truncate"
+                title={activeTitle}
+              >
+                {activeTitle}
+              </h2>
+            </div>
+          </div>
+        )}
+
         <ChatWindow
           messages={session.messages}
           isStreaming={isStreaming}
           userFirstname={user.firstname}
+          errored={isErrored}
+          errorMessage={session.error}
+          onRetry={retry}
+          loadKey={loadKey}
         />
 
-        {session.error && (
+        {/* Inline error banner only when not in the errored phase; the retry
+            card inside ChatWindow already conveys the errored state. */}
+        {session.error && !isErrored && (
           <div className="mx-4 mb-2 px-4 py-2 bg-rose-50 border border-rose-200 rounded-lg text-sm text-rose-700 flex-shrink-0">
             {session.error}
           </div>

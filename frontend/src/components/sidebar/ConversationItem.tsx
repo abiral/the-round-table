@@ -26,14 +26,29 @@ export function ConversationItem({ item, active, onSelect, onDelete }: Conversat
 
   return (
     <div
-      className={cn(
-        'group flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer',
-        active ? 'bg-primary-soft text-primary-600' : 'text-text-default hover:bg-surface-muted',
-      )}
       onClick={() => onSelect(item.id)}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onSelect(item.id)
+        }
+      }}
+      className={cn(
+        'group flex items-center gap-2 pl-2 pr-1.5 py-2 rounded-lg cursor-pointer transition-colors',
+        active
+          ? 'bg-primary-soft text-primary-600'
+          : 'text-text-default hover:bg-surface-muted',
+      )}
     >
-      <Icon className={cn('size-3.5 shrink-0', active ? 'text-primary-500' : STATUS_COLOR[item.status])} />
-      <span className="text-sm flex-1 min-w-0 truncate">
+      <Icon
+        className={cn(
+          'size-4 shrink-0',
+          active ? 'text-primary-500' : STATUS_COLOR[item.status],
+        )}
+      />
+      <span className="text-sm flex-1 min-w-0 truncate leading-snug">
         {item.title || 'Untitled brainstorm'}
       </span>
       <button
@@ -42,9 +57,12 @@ export function ConversationItem({ item, active, onSelect, onDelete }: Conversat
           e.stopPropagation()
           if (window.confirm('Delete this conversation?')) onDelete(item.id)
         }}
-        title="Delete"
-        className="size-6 rounded grid place-items-center opacity-0 group-hover:opacity-100
-                   text-text-subtle hover:text-rose-600 hover:bg-rose-50 transition"
+        title="Delete conversation"
+        aria-label="Delete conversation"
+        className="size-6 rounded grid place-items-center shrink-0
+                   text-text-subtle/70 hover:text-rose-600 hover:bg-rose-50
+                   focus:outline-none focus:ring-2 focus:ring-rose-300
+                   transition"
       >
         <Trash2 className="size-3.5" />
       </button>

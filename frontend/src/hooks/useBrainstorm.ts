@@ -31,6 +31,10 @@ export interface UseBrainstormOptions {
 
 export function useBrainstorm(options: UseBrainstormOptions = {}) {
   const [session, setSession] = useState<BrainstormSession>(INITIAL_SESSION)
+  // Incremented every time we bulk-load a conversation. ChatWindow watches it
+  // to know "this is not an incremental append, jump to the top so the user
+  // sees their original problem first."
+  const [loadKey, setLoadKey] = useState(0)
   const abortRef = useRef<AbortController | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const onSavedRef = useRef(options.onSaved)
@@ -131,6 +135,9 @@ export function useBrainstorm(options: UseBrainstormOptions = {}) {
             if (event.session_id) {
               sessionIdRef.current = event.session_id
               setSession(prev => ({ ...prev, sessionId: event.session_id! }))
+              // Backend has already pre-created the conversation row, so the
+              // sidebar can pick it up immediately (with a fallback title).
+              onSavedRef.current?.()
             }
             break
           case 'agent_start':
@@ -181,13 +188,25 @@ export function useBrainstorm(options: UseBrainstormOptions = {}) {
           case 'error':
             setSession(prev => ({
               ...prev,
-              phase: 'idle',
+              phase: 'errored',
               error: event.message ?? 'An error occurred',
             }))
+            // Save still happened on the backend, refresh the sidebar so this
+            // conversation appears with the partial transcript.
+            onSavedRef.current?.()
             break
         }
       }
     }
+
+    // The stream closed. If we never received a terminal event ('done',
+    // 'awaiting_user_input', 'conclude_offered', or 'error'), the connection
+    // was interrupted: mark the session as errored so the retry button shows.
+    setSession(prev =>
+      prev.phase === 'streaming'
+        ? { ...prev, phase: 'errored', error: prev.error ?? 'Connection lost' }
+        : prev
+    )
   }, [addAgentMessage, appendChunk, finishAgent])
 
   // ── Public actions ────────────────────────────────────────────────────
@@ -339,7 +358,7 @@ export function useBrainstorm(options: UseBrainstormOptions = {}) {
     ]
     timeline.sort((a, b) => a.ts.localeCompare(b.ts))
 
-    const messages: ChatMessage[] = timeline.map(entry => {
+    const timelineMessages: ChatMessage[] = timeline.map(entry => {
       if (entry.kind === 'user') {
         return {
           id: uid(),
@@ -362,29 +381,85 @@ export function useBrainstorm(options: UseBrainstormOptions = {}) {
       } satisfies AgentMessage
     })
 
+    // Surface the original problem as the first user message. It lives in
+    // state.user_goal, not in user_inputs.
+    const messages: ChatMessage[] = state.user_goal
+      ? [
+          {
+            id: uid(),
+            kind: 'user',
+            content: state.user_goal,
+            timestamp: new Date(0),
+          } satisfies UserMessage,
+          ...timelineMessages,
+        ]
+      : timelineMessages
+
+    // status='in_progress' on a saved conversation means the previous run did
+    // not reach a pause or conclusion, so the user should retry.
+    const phase: BrainstormSession['phase'] =
+      detail.status === 'awaiting_user' ? 'awaiting_user'
+      : detail.status === 'concluded'   ? 'concluded'
+      :                                   'errored'
+
     setSession({
       sessionId: conversationId,
       messages,
-      phase:
-        detail.status === 'awaiting_user' ? 'awaiting_user'
-        : detail.status === 'concluded'   ? 'concluded'
-        :                                   'idle',
+      phase,
       pausePrompt: detail.status === 'awaiting_user'
         ? { summary: state.pause_summary ?? '', question: state.pause_question ?? '' }
         : null,
       conclusionSummary: detail.status === 'concluded' ? (state.final_summary ?? null) : null,
       exportsAvailable: detail.status === 'concluded' ? ['pdf', 'adr', 'plan'] : [],
       consensusScore: null,
-      error: null,
+      error: phase === 'errored' ? 'This session was interrupted.' : null,
     })
+    // Signal the chat surface to scroll to the top so the original problem is visible.
+    setLoadKey(k => k + 1)
   }, [])
 
   const newConversation = useCallback(() => {
     reset()
   }, [reset])
 
+  /**
+   * Resume an interrupted or errored conversation. Drops any half-streamed
+   * agent placeholders, then opens a fresh SSE stream against /retry.
+   */
+  const retry = useCallback(async () => {
+    const sid = sessionIdRef.current
+    if (!sid) return
+
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
+    setSession(prev => ({
+      ...prev,
+      messages: prev.messages.filter(m => !(m.kind === 'agent' && m.isStreaming)),
+      phase: 'streaming',
+      error: null,
+    }))
+
+    try {
+      const res = await apiFetch(`/api/brainstorm/${sid}/retry`, {
+        method: 'POST',
+        signal: controller.signal,
+      })
+      await consumeSSE(res)
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') return
+      setSession(prev => ({
+        ...prev,
+        phase: 'errored',
+        error: err instanceof Error ? err.message : 'Retry failed',
+      }))
+    }
+  }, [consumeSSE])
+
   return {
     session,
+    loadKey,
     submitProblem,
     sendUserReply,
     downloadExport,
@@ -392,6 +467,7 @@ export function useBrainstorm(options: UseBrainstormOptions = {}) {
     reset,
     loadConversation,
     newConversation,
+    retry,
   }
 }
 
